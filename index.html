@@ -4977,7 +4977,7 @@ body.aisle-value-modal-open{
   </div>
 </div>
 
-<footer>UCA Dashboard · Capacidades: UCA general 01–04 = 416 UBIs; 05–08 = 60 UBIs. ACTIVO 01–04 = 104 UBIs; 05–08 = 60 UBIs. ACTIVOS 01–04 = 104 UBIs y 05–08 = 60 UBIs; RESERVA_PISO: Pasillo 09 = 63, 10 = 52, 11 = 52, 12 = 26 y 13 = 4 ubicaciones máximas. Verde &lt;85%, naranja 85%–91.99%, rojo ≥92%. La opción Cargar datos permite actualizar la información del Dashboard.</footer>
+<footer>UCA Dashboard · Capacidades: UCA general 01–04 = 520 UBIs (104 ACTIVO + 416 RESERVA); 05–08 = 60 UBIs. ACTIVO 01–04 = 104 UBIs; 05–08 = 60 UBIs. ACTIVOS 01–04 = 104 UBIs y 05–08 = 60 UBIs; RESERVA_PISO: Pasillo 09 = 63, 10 = 52, 11 = 52, 12 = 26 y 13 = 4 ubicaciones máximas. Verde &lt;85%, naranja 85%–91.99%, rojo ≥92%. La opción Cargar datos permite actualizar la información del Dashboard.</footer>
 </div>
 
 <script>
@@ -5029,7 +5029,7 @@ function getChartConfig(tipo){
    return {labels,caps,title:"ACTIVOS - POR PASILLOS",types:["ACTIVO"]};
  }
  const labels=["01","02","03","04","05","06","07","08","09","10","11","12"];
- const caps={"01":416,"02":416,"03":416,"04":416,"05":60,"06":60,"07":60,"08":60,"09":63,"10":52,"11":52,"12":26};
+ const caps={"01":520,"02":520,"03":520,"04":520,"05":60,"06":60,"07":60,"08":60,"09":63,"10":52,"11":52,"12":26};
  return {labels,caps,title:"UCA - POR PASILLOS",types:null};
 }
 function summarize(rows, labels){
@@ -5095,21 +5095,23 @@ function getZoneOccupancyFromExcel(rows){
     return preferred.includes(zone);
   });
 
-  const countByZone=new Map();
+  const locationsByZone=new Map();
   const qtyByZone=new Map();
   const skuByZone=new Map();
 
   preferred.forEach(z=>{
-    countByZone.set(z,0);
+    locationsByZone.set(z,new Set());
     qtyByZone.set(z,0);
     skuByZone.set(z,new Set());
   });
 
   validRows.forEach(r=>{
     const zone=normalizeZoneName(r.ZONA);
+    const loc=String(r["UBICACIÓN"]||r["UBICACION"]||"").trim().toUpperCase();
 
-    // Cada fila cuenta como una ocupada, incluso si repite UBICACIÓN.
-    countByZone.set(zone,(countByZone.get(zone)||0)+1);
+    // Fill Rate = ubicaciones físicas ocupadas / capacidad.
+    // Si una ubicación aparece en varias filas (más de un SKU o bulto), se cuenta una sola vez.
+    if(loc && isLocationOccupiedFromExcel([r])) locationsByZone.get(zone).add(loc);
 
     qtyByZone.set(zone,(qtyByZone.get(zone)||0)+(Number(r.CANTIDAD)||0));
 
@@ -5118,7 +5120,7 @@ function getZoneOccupancyFromExcel(rows){
   });
 
   return preferred.map(zone=>{
-    const occupied=countByZone.get(zone)||0;
+    const occupied=(locationsByZone.get(zone)||new Set()).size;
     const total=zoneCapacity[zone]||occupied;
     const available=Math.max(0,total-occupied);
     const pct=total ? Math.min(100,occupied/total*100) : 0;
@@ -5231,19 +5233,29 @@ function getZoneDetailContext(){
            allowedZones.includes(zone);
   });
 
-  // Cada fila se considera una ocupada independiente,
-  // aunque la UBICACIÓN se repita.
-  const occupied=zoneRows.map((r,index)=>({
-    rowNo:index+1,
-    zone:normalizeZoneName(r.ZONA),
-    aisle:String(r.PASILLO||"").trim(),
-    loc:String(r["UBICACIÓN"]||"").trim(),
-    type:String(r.TIPO||"").trim(),
-    carton:String(r.BULTO||"").trim(),
-    sku:String(r.SKU||"").trim(),
-    product:String(r.PRODUCTO||"").trim(),
-    qty:Number(r.CANTIDAD)||0
-  }));
+  // Una ubicación física cuenta una sola vez para ocupación/fill rate.
+  const occupiedMap=new Map();
+  zoneRows.forEach(r=>{
+    const zone=normalizeZoneName(r.ZONA);
+    const loc=String(r["UBICACIÓN"]||r["UBICACION"]||"").trim().toUpperCase();
+    if(!loc || !isLocationOccupiedFromExcel([r])) return;
+    const key=zone+"|"+loc;
+    if(!occupiedMap.has(key)){
+      occupiedMap.set(key,{
+        zone,
+        aisle:String(r.PASILLO||"").trim(),
+        loc,
+        type:String(r.TIPO||"").trim(),
+        carton:String(r.BULTO||"").trim(),
+        sku:String(r.SKU||"").trim(),
+        product:String(r.PRODUCTO||"").trim(),
+        qty:Number(r.CANTIDAD)||0
+      });
+    }else{
+      occupiedMap.get(key).qty+=(Number(r.CANTIDAD)||0);
+    }
+  });
+  const occupied=[...occupiedMap.values()].map((x,index)=>({...x,rowNo:index+1}));
 
   return {reserveRows:zoneRows,occupied};
 }
@@ -5289,7 +5301,7 @@ function openZoneCountDetail(zone,metric){
   const pct=totalCap ? occupiedCount/totalCap*100 : 0;
 
   $("zoneCountTitle").textContent=`${zone} · ${zoneMetricLabel(metric)}`;
-  $("zoneCountSubtitle").textContent="Fuente exacta: UCA · Columna C = ZONA · se excluye TIPO ACTIVO · OCUPADAS = cada fila, aunque repita UBICACIÓN";
+  $("zoneCountSubtitle").textContent="Fuente exacta: UCA · Columna C = ZONA · se excluye TIPO ACTIVO · OCUPADAS = UBICACIONES únicas";
   $("zoneCountSummary").innerHTML=`
     <span class="zone-count-pill">Ubicaciones ocupadas: ${num(occupiedCount)}</span>
     <span class="zone-count-pill orange">Cantidad: ${num(qtyTotal)} UND</span>
@@ -5323,7 +5335,7 @@ function openZoneCountDetail(zone,metric){
     </tr>`).join("") || `<tr><td colspan="8" class="zone-count-empty">No hay filas con cantidad para este grupo.</td></tr>`;
     foot.innerHTML=`<tr><td colspan="7">TOTAL SUMADO</td><td class="num">${num(qtyTotal)}</td></tr>`;
   }else if(metric==="occupied"){
-    note.textContent="Cada fila válida del Excel cuenta como una ocupada. Si varias filas tienen la misma UBICACIÓN, TODAS se cuentan por separado. Se excluye TIPO = ACTIVO.";
+    note.textContent="Cada UBICACIÓN física cuenta una sola vez. Si varias filas tienen la misma UBICACIÓN, se consolidan para el Fill Rate. Se excluye TIPO = ACTIVO.";
     head.innerHTML=`<tr>
       <th>#</th><th>ZONA</th><th>TIPO</th><th>PASILLO</th><th>UBICACIÓN</th>
       <th>BULTO</th><th>SKU</th><th>PRODUCTO</th><th>CANTIDAD</th>
@@ -5339,7 +5351,7 @@ function openZoneCountDetail(zone,metric){
       <td>${esc(x.product||"—")}</td>
       <td class="num">${num(x.qty)}</td>
     </tr>`).join("") || `<tr><td colspan="9" class="zone-count-empty">No hay filas para este grupo.</td></tr>`;
-    foot.innerHTML=`<tr><td colspan="8">TOTAL FILAS CONTADAS COMO OCUPADAS</td><td class="num">${num(occupiedCount)}</td></tr>`;
+    foot.innerHTML=`<tr><td colspan="8">TOTAL UBICACIONES ÚNICAS OCUPADAS</td><td class="num">${num(occupiedCount)}</td></tr>`;
   }else if(metric==="sku"){
     note.textContent="Estos son los SKU únicos presentes en las filas RESERVA + RESERVA_PISO que forman el indicador SKU ACTIVOS.";
     const skuMap=new Map();
@@ -5458,7 +5470,7 @@ function renderZoneOccupancyFromExcel(rows){
 
   const sourceEl=$("zoneExcelSource");
   if(sourceEl){
-    sourceEl.textContent=`Fuente: ${ZONE_OCCUPANCY_SOURCE||"Excel"} · UCA · ZONA desde columna C · excluye TIPO ACTIVO · OCUPADAS = cada fila válida · repeticiones de UBICACIÓN sí cuentan · Capacidad FOOD 857 | NONFOOD 903 | SENSIBLES 44`;
+    sourceEl.textContent=`Fuente: ${ZONE_OCCUPANCY_SOURCE||"Excel"} · UCA · ZONA desde columna C · excluye TIPO ACTIVO · OCUPADAS = ubicaciones únicas · una UBICACIÓN repetida se cuenta una sola vez · Capacidad FOOD 857 | NONFOOD 903 | SENSIBLES 44`;
   }
 
   initZoneHover();
@@ -7595,7 +7607,7 @@ function renderExpiryCard(rows){
   });
 
   // Totales globales de ubicaciones
-  const globalCaps={"01":416,"02":416,"03":416,"04":416,"05":60,"06":60,"07":60,"08":60,"09":63,"10":52,"11":52,"12":26};
+  const globalCaps={"01":520,"02":520,"03":520,"04":520,"05":60,"06":60,"07":60,"08":60,"09":63,"10":52,"11":52,"12":26};
   const globalLabels=["01","02","03","04","05","06","07","08","09","10","11","12"];
   const globalSummary=summarize(source,globalLabels);
   const totalCapacity=globalLabels.reduce((acc,p)=>acc+(globalCaps[p]||0),0);
